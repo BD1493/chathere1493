@@ -22,17 +22,16 @@ function readData(filePath) {
     try {
         const data = fs.readFileSync(filePath, 'utf8');
         
-        // --- CORRECTED CHECK: Handle empty file data before JSON.parse ---
-        if (data.trim() === '') {
-            // Return an empty array or object based on the file's expected structure
-            // Users and Video Feed are arrays ([]), Chats is an object ({})
+        // --- CRITICAL FIX: Handle empty file or non-JSON content gracefully ---
+        if (data.trim() === '' || data.trim()[0] !== '[' && data.trim()[0] !== '{') {
+            // Determine the appropriate default structure based on the file type
             if (filePath === USER_FILE || filePath === VIDEO_FEED_FILE) {
                 return [];
             } else if (filePath === CHAT_FILE) {
                 return { chats: [], groups: [], chatRequests: [], messages: {} };
             }
         }
-        // --- END CORRECTED CHECK ---
+        // --- END CRITICAL FIX ---
         
         return JSON.parse(data);
     } catch (e) {
@@ -76,7 +75,14 @@ function init() {
     ensureFileExists(VIDEO_FEED_FILE, []);
     
     // Check if a default admin exists, create one if not
-    const users = readData(USER_FILE);
+    let users = readData(USER_FILE);
+    
+    // --- SECOND CRITICAL FIX: Ensure 'users' is an array before using .find() ---
+    if (!Array.isArray(users)) {
+        users = [];
+    }
+    // --- END SECOND CRITICAL FIX ---
+
     if (!users.find(u => u.isAdmin)) {
         const adminId = crypto.randomUUID();
         const adminUser = {
