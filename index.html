@@ -1,0 +1,1160 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Real-Time Messenger App</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@100..900&display=swap" rel="stylesheet">
+    <script src="https://unpkg.com/phosphor-icons"></script>
+    <script src="https://cdn.socket.io/4.7.5/socket.io.min.js"></script>
+
+    <style>
+        :root {
+            --primary: #3b82f6; /* Blue-500 */
+            --secondary: #10b981; /* Emerald-500 */
+            --bg-dark: #1f2937; /* Gray-800 */
+            --bg-light: #f9fafb; /* Gray-50 */
+        }
+        body {
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-light);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            margin: 0;
+        }
+        .app-container {
+            width: 100%;
+            max-width: 1200px;
+            height: 95vh;
+            max-height: 900px;
+            display: flex;
+            background: white;
+            border-radius: 1.5rem;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+            overflow: hidden;
+        }
+        .form-input {
+            padding: 0.75rem;
+            border-radius: 0.5rem;
+            border: 1px solid #d1d5db;
+            width: 100%;
+            transition: all 0.2s;
+        }
+        .form-input:focus {
+            border-color: var(--primary);
+            box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.5);
+            outline: none;
+        }
+        .btn-primary {
+            background-color: var(--primary);
+            color: white;
+            padding: 0.75rem 1.5rem;
+            border-radius: 0.5rem;
+            font-weight: 600;
+            transition: background-color 0.2s;
+        }
+        .btn-primary:hover {
+            background-color: #2563eb;
+        }
+        /* Scrollbar styles for chat/dashboard lists */
+        .custom-scroll::-webkit-scrollbar {
+            width: 6px;
+        }
+        .custom-scroll::-webkit-scrollbar-thumb {
+            background-color: #d1d5db;
+            border-radius: 10px;
+        }
+        .custom-scroll::-webkit-scrollbar-track {
+            background-color: transparent;
+        }
+        .message-bubble {
+            max-width: 80%;
+            padding: 10px 15px;
+            border-radius: 1.25rem;
+            line-height: 1.4;
+        }
+    </style>
+</head>
+<body>
+
+<div id="app" class="app-container">
+    </div>
+
+<script>
+    // --- Global Configuration ---
+    const API_URL = 'http://localhost:3000/api';
+    const SOCKET_URL = 'http://localhost:3000';
+    const API_SECRET_KEY = 'your_super_secret_api_key_12345'; // MUST MATCH server.js
+    const ADMIN_SECRET_KEY = 'admin_master_access_key'; // MUST MATCH server.js
+
+    // --- Application State ---
+    let state = {
+        user: null, // Logged in user object
+        view: 'auth', // 'auth', 'dashboard', 'chat', 'search', 'feed', 'admin', 'consent'
+        apiToken: API_SECRET_KEY,
+        dashboardData: null,
+        activeChatId: null,
+        activeChatPartner: null,
+        chatHistory: [],
+        searchResults: [],
+        adminKeyInput: '',
+        adminViewUsers: [],
+        videoFeed: [],
+        socket: null,
+        activeUsers: new Map(), // Map<userId, isOnline>
+        tempMessage: '' // For chat input field state
+    };
+
+    // --- Utility Functions ---
+
+    /**
+     * General purpose API fetcher with token
+     */
+    async function apiFetch(endpoint, options = {}) {
+        const headers = {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${state.apiToken}`,
+            ...options.headers
+        };
+        
+        const fetchOptions = {
+            method: options.method || 'GET',
+            headers: headers
+        };
+        
+        if (options.body && fetchOptions.method !== 'GET') {
+            fetchOptions.body = JSON.stringify(options.body);
+        }
+
+        try {
+            const response = await fetch(`${API_URL}${endpoint}`, fetchOptions);
+            const data = await response.json();
+            
+            if (!response.ok) {
+                console.error('API Error:', data.error || 'Unknown error');
+                alert(`API Error: ${data.error || 'Failed request.'}`);
+                throw new Error(data.error || 'Failed to fetch data.');
+            }
+            return data;
+        } catch(e) {
+            console.error('Network or Parse Error:', e);
+            alert(`Network Error: ${e.message}`);
+            throw e;
+        }
+    }
+    
+    /**
+     * General File Upload Function
+     */
+    async function uploadFile(endpoint, formData) {
+        try {
+            const response = await fetch(`${API_URL}${endpoint}`, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${state.apiToken}`,
+                    // Note: 'Content-Type' should NOT be set manually for FormData
+                },
+                body: formData
+            });
+
+            const data = await response.json();
+            
+            if (!response.ok) {
+                alert(`Upload Error: ${data.error || 'Failed to upload file.'}`);
+                throw new Error(data.error || 'Upload failed.');
+            }
+            return data;
+        } catch (e) {
+            console.error('Upload Error:', e);
+            throw e;
+        }
+    }
+
+
+    /**
+     * Converts raw text to HTML (basic XSS prevention)
+     */
+    function sanitize(text) {
+        const element = document.createElement('div');
+        element.innerText = text;
+        return element.innerHTML;
+    }
+
+    /**
+     * Helper to render icons
+     */
+    function Icon(name, size = 20, className = '') {
+        return `<i class="ph-${name} ${className}" style="font-size:${size}px;"></i>`;
+    }
+    
+    /**
+     * Scrolls an element to the bottom
+     */
+    function scrollToBottom(id) {
+        const element = document.getElementById(id);
+        if (element) {
+            // Use a slight delay to ensure content has rendered
+            setTimeout(() => {
+                element.scrollTop = element.scrollHeight;
+            }, 50);
+        }
+    }
+
+    /**
+     * Update State and Re-render
+     */
+    function updateState(newState, shouldRender = true) {
+        Object.assign(state, newState);
+        if (shouldRender) render();
+    }
+
+    // --- Socket.IO & Real-Time Logic ---
+
+    function initializeSocket() {
+        if (state.socket) {
+            state.socket.disconnect();
+        }
+        
+        state.socket = io(SOCKET_URL, {
+            auth: {
+                token: state.user.id
+            }
+        });
+
+        state.socket.on('connect', () => {
+            console.log('Socket connected:', state.socket.id);
+            // Request initial statuses for all chat partners
+            if (state.dashboardData?.chats) {
+                 [...state.dashboardData.chats.accepted].forEach(chat => {
+                    state.socket.emit('check_status', chat.partnerId);
+                });
+            }
+        });
+
+        state.socket.on('disconnect', () => {
+            console.log('Socket disconnected');
+        });
+
+        state.socket.on('new_message', (message) => {
+            if (message.chatId === state.activeChatId) {
+                updateState({ chatHistory: [...state.chatHistory, message] });
+                scrollToBottom('chat-messages');
+            } else {
+                // Trigger a notification or chat list update for new messages
+                fetchDashboardData(false);
+            }
+        });
+
+        state.socket.on('request_update', (data) => {
+            if (data.userId === state.user.id) {
+                alert('You have a new chat request!');
+                fetchDashboardData(false);
+            }
+        });
+        
+        state.socket.on('user_status_update', (data) => {
+            state.activeUsers.set(data.userId, data.isOnline);
+            // Re-render chat list or active chat header
+            if (state.view === 'dashboard' || data.userId === state.activeChatPartner?.id) {
+                 render(); // Renders the dashboard/chat based on current view
+            }
+        });
+    }
+
+    // --- Consent Flow ---
+
+    const CONSENT_KEYS = ['tos-consent', 'data-usage-consent', 'e2e-info-consent'];
+
+    function checkConsent() {
+        if (state.user) return; // Skip if already logged in
+
+        for (const key of CONSENT_KEYS) {
+            if (localStorage.getItem(key) !== 'agreed') {
+                updateState({ view: 'consent', consentStep: key });
+                return;
+            }
+        }
+        updateState({ view: 'auth' });
+    }
+    
+    function handleConsent(key) {
+        localStorage.setItem(key, 'agreed');
+        
+        const nextIndex = CONSENT_KEYS.indexOf(key) + 1;
+        if (nextIndex < CONSENT_KEYS.length) {
+            updateState({ consentStep: CONSENT_KEYS[nextIndex] });
+        } else {
+            updateState({ view: 'auth', consentStep: null });
+        }
+    }
+    
+    function denyConsent() {
+         document.getElementById('app').innerHTML = `
+            <div class="flex flex-col items-center justify-center h-full p-8 text-center bg-red-50">
+                <h2 class="text-3xl font-bold text-red-700 mb-4">Access Denied</h2>
+                <p class="text-gray-600">You must agree to the terms and data usage policies to use this application.</p>
+                <button onclick="localStorage.clear(); checkConsent()" class="mt-6 btn-primary bg-gray-500 hover:bg-gray-600">Start Over</button>
+            </div>
+         `;
+    }
+
+    // --- Authentication & Session Management ---
+
+    function checkSession() {
+        const userId = localStorage.getItem('userId');
+        if (userId) {
+            fetchUser(userId);
+        } else {
+            checkConsent();
+        }
+    }
+
+    async function fetchUser(userId) {
+        try {
+            const data = await apiFetch(`/users/${userId}`);
+            updateState({ 
+                user: data.user, 
+                view: 'dashboard' 
+            });
+            initializeSocket();
+            fetchDashboardData();
+        } catch (e) {
+            localStorage.removeItem('userId');
+            updateState({ user: null, view: 'auth' });
+        }
+    }
+
+    async function handleAuth(event, type) {
+        event.preventDefault();
+        const form = event.target;
+        const email = form.email.value;
+        const password = form.password.value;
+        const name = form.name ? form.name.value : undefined;
+        const age = form.age ? form.age.value : undefined;
+
+        try {
+            const endpoint = type === 'login' ? '/auth/login' : '/auth/signup';
+            let body = { email, password };
+            if (type === 'signup') {
+                body = { ...body, name, age };
+            }
+            
+            const data = await apiFetch(endpoint, { method: 'POST', body });
+
+            if (data.success && type === 'login') {
+                localStorage.setItem('userId', data.user.id);
+                updateState({ user: data.user, view: 'dashboard' });
+                initializeSocket();
+                fetchDashboardData();
+            } else if (data.success && type === 'signup') {
+                alert('Sign up successful! Please log in.');
+                document.getElementById('auth-form-container').innerHTML = renderLoginForm();
+            } else if (data.user?.isAdmin) {
+                 // Handle admin login separately if needed, but for now, they go to dashboard
+                 localStorage.setItem('userId', data.user.id);
+                 updateState({ user: data.user, view: 'admin' });
+                 initializeSocket();
+                 fetchAdminUsers();
+            }
+        } catch (e) {
+            // Error handled by apiFetch alert
+        }
+    }
+
+    function logout() {
+        if (state.socket) {
+            state.socket.emit('user_status_change', { userId: state.user.id, isOnline: false });
+            state.socket.disconnect();
+        }
+        localStorage.removeItem('userId');
+        updateState({ user: null, view: 'auth', activeChatId: null, dashboardData: null });
+        checkConsent();
+    }
+    
+    // --- Dashboard & Chat Logic ---
+
+    async function fetchDashboardData(shouldRender = true) {
+        if (!state.user) return;
+        try {
+            const data = await apiFetch(`/users/${state.user.id}/dashboard`);
+            const newState = { 
+                dashboardData: {
+                    chats: data.chats,
+                    pendingRequests: data.user.pending_requests_in
+                }
+            };
+            // Update current user object for request count
+            Object.assign(state.user, { pending_requests_in: data.user.pending_requests_in }); 
+            updateState(newState, shouldRender && state.view !== 'chat');
+            
+            if (state.activeChatId && shouldRender) {
+                // If a chat is active, ensure we update the status display
+                renderChatHeader();
+            }
+        } catch (e) {
+            console.error('Failed to fetch dashboard:', e);
+        }
+    }
+
+    async function openChat(chatId, partnerId, isGroup = false) {
+        try {
+            const history = await apiFetch(`/chat/history/${chatId}`);
+            
+            const chatObject = isGroup 
+                ? state.dashboardData.chats.groups.find(g => g.groupId === chatId)
+                : state.dashboardData.chats.accepted.find(c => c.chatId === chatId);
+
+            let partner = null;
+            if (partnerId) {
+                const partnerData = await apiFetch(`/users/${partnerId}`);
+                partner = partnerData.user;
+            }
+            
+            updateState({
+                view: 'chat',
+                activeChatId: chatId,
+                activeChatPartner: { 
+                    id: partnerId, 
+                    name: chatObject.partnerName || chatObject.groupName,
+                    isGroup: isGroup,
+                    members: chatObject.members // For groups
+                },
+                chatHistory: history.messages || []
+            });
+            
+            if (partnerId) {
+                // Check partner status upon opening chat
+                state.socket.emit('check_status', partnerId);
+            }
+            scrollToBottom('chat-messages');
+
+        } catch (e) {
+            console.error('Failed to open chat:', e);
+        }
+    }
+    
+    function updateTempMessage(event) {
+        state.tempMessage = event.target.value;
+    }
+
+    function sendMessage(event) {
+        event.preventDefault();
+        const input = document.getElementById('message-input');
+        const text = input.value.trim();
+
+        if (!text || !state.activeChatId) return;
+
+        const isGroup = state.activeChatPartner?.isGroup || false;
+
+        const message = {
+            chatId: state.activeChatId,
+            senderId: state.user.id,
+            senderName: state.user.name,
+            text: text,
+            isGroup: isGroup,
+            timestamp: Date.now()
+        };
+
+        state.socket.emit('send_message', message, (response) => {
+            if (response.success) {
+                input.value = '';
+                state.tempMessage = '';
+                // The 'new_message' handler will display the message when received via socket
+            } else {
+                alert(response.error || 'Failed to send message.');
+            }
+        });
+    }
+
+    // --- Search & Requests ---
+    
+    async function handleUserSearch(event) {
+        event.preventDefault();
+        const query = document.getElementById('search-query').value;
+        if (!query) return;
+
+        try {
+            const data = await apiFetch(`/users/search?query=${encodeURIComponent(query)}`);
+            updateState({ searchResults: data.users });
+        } catch (e) {
+             updateState({ searchResults: [] });
+        }
+    }
+    
+    async function sendChatRequest(targetId, targetName) {
+        try {
+            await apiFetch('/chat/request', {
+                method: 'POST',
+                body: { senderId: state.user.id, senderName: state.user.name, targetId }
+            });
+            alert(`Request sent to ${targetName}!`);
+            state.socket.emit('notify_request', { userId: targetId });
+        } catch (e) {
+             // Error already alerted by apiFetch
+        }
+    }
+    
+    async function handleRequestAction(senderId, action) {
+        try {
+            await apiFetch('/chat/handle_request', {
+                method: 'POST',
+                body: { targetId: state.user.id, senderId, action }
+            });
+            alert(`Request ${action}ed.`);
+            fetchDashboardData(); // Refresh the entire dashboard
+        } catch (e) {
+            // Error already alerted by apiFetch
+        }
+    }
+    
+    // --- Video Feed ---
+    
+    async function fetchVideoFeed() {
+        try {
+            const data = await apiFetch('/videos/feed');
+            updateState({ videoFeed: data.feed, view: 'feed' });
+        } catch (e) {
+            updateState({ videoFeed: [], view: 'feed' });
+        }
+    }
+    
+    async function handleVideoPost(event) {
+        event.preventDefault();
+        const url = document.getElementById('video-url').value;
+        const caption = document.getElementById('video-caption').value;
+
+        try {
+            await apiFetch('/videos/post', {
+                method: 'POST',
+                body: { url, caption, posterId: state.user.id, posterName: state.user.name }
+            });
+            document.getElementById('post-video-form').reset();
+            alert('Video posted successfully!');
+            fetchVideoFeed();
+        } catch (e) {
+             // Error already alerted by apiFetch
+        }
+    }
+
+    // --- Profile Management ---
+
+    async function handleProfilePicUpload(event) {
+        event.preventDefault();
+        const fileInput = document.getElementById('profile-pic-file');
+        const file = fileInput.files[0];
+        if (!file) return;
+
+        const formData = new FormData();
+        formData.append('profile_pic', file);
+        formData.append('userId', state.user.id);
+
+        try {
+            const data = await uploadFile('/profile/upload_pic', formData);
+            alert(data.message);
+            // Update local state and re-render
+            updateState({ user: { ...state.user, profilePic: data.filePath } });
+        } catch (e) {
+            // Error already alerted by alertFile
+        }
+    }
+
+    // --- Admin Functions ---
+    
+    async function fetchAdminUsers(secretKey = null) {
+        try {
+            const endpoint = '/admin/users';
+            const body = { adminKey: secretKey || '' };
+            
+            const data = await apiFetch(endpoint, { method: 'POST', body });
+            updateState({ adminViewUsers: data.users, adminKeyInput: secretKey || '' });
+        } catch (e) {
+            updateState({ adminViewUsers: [], adminKeyInput: '' });
+        }
+    }
+    
+    async function deleteUser(userIdToDelete) {
+        if (!confirm(`Are you sure you want to delete user ${userIdToDelete}?`)) return;
+        try {
+            await apiFetch('/admin/delete', { method: 'POST', body: { userId: userIdToDelete } });
+            alert('User deleted.');
+            fetchAdminUsers(state.adminKeyInput);
+        } catch (e) {
+            // Error already alerted by apiFetch
+        }
+    }
+    
+    function showAdminSecretPrompt() {
+        const key = prompt("Enter the Admin Secret Key to view sensitive user data:");
+        if (key) {
+            fetchAdminUsers(key);
+        }
+    }
+
+
+    // =========================================================================
+    // --- View Rendering (All functions that return HTML) ---
+    // =========================================================================
+
+    function renderAuthView() {
+        return `
+            <div class="flex-grow flex items-center justify-center p-8 bg-gray-50">
+                <div class="w-full max-w-sm space-y-6 bg-white p-8 rounded-xl shadow-lg">
+                    <h2 class="text-3xl font-bold text-center text-gray-800">${Icon('chats-circle', 30, 'inline-block mr-2 text-primary')}Secure Chat App</h2>
+                    <div id="auth-form-container">${renderLoginForm()}</div>
+                    <p id="toggle-link" class="text-center text-sm text-gray-600 cursor-pointer hover:text-primary transition" onclick="toggleAuthForm()">
+                        Don't have an account? Sign Up
+                    </p>
+                    ${state.user?.isAdmin ? '' : `<p class="text-center text-xs text-gray-500">
+                        Admin? <span class="text-primary cursor-pointer" onclick="document.getElementById('auth-form-container').innerHTML = renderAdminLoginForm(); document.getElementById('toggle-link').classList.add('hidden');">Log In</span>
+                    </p>`}
+                </div>
+            </div>
+        `;
+    }
+    
+    function renderLoginForm() {
+        return `
+            <form id="login-form" onsubmit="handleAuth(event, 'login')" class="space-y-4">
+                <input type="email" id="email" name="email" placeholder="Email" required class="form-input">
+                <input type="password" id="password" name="password" placeholder="Password" required class="form-input">
+                <button type="submit" class="w-full btn-primary">Log In</button>
+            </form>
+        `;
+    }
+    
+    function renderSignupForm() {
+        return `
+            <form id="signup-form" onsubmit="handleAuth(event, 'signup')" class="space-y-4">
+                <input type="text" id="name" name="name" placeholder="Full Name" required class="form-input">
+                <input type="number" id="age" name="age" placeholder="Age (must be > 13)" required min="14" class="form-input">
+                <input type="email" id="email" name="email" placeholder="Email" required class="form-input">
+                <input type="password" id="password" name="password" placeholder="Password (min 6 chars)" required minlength="6" class="form-input">
+                <button type="submit" class="w-full btn-primary">Sign Up</button>
+            </form>
+        `;
+    }
+    
+    function renderAdminLoginForm() {
+         return `
+            <form id="admin-login-form" onsubmit="handleAuth(event, 'login')" class="space-y-4 border border-red-300 p-4 rounded-lg bg-red-50">
+                <h3 class="text-xl font-bold text-red-700">Admin Access</h3>
+                <input type="email" id="email" name="email" placeholder="Admin Email (admin@chat.com)" required class="form-input border-red-400">
+                <input type="password" id="password" name="password" placeholder="Password (admin123)" required class="form-input border-red-400">
+                <button type="submit" class="w-full btn-primary bg-red-600 hover:bg-red-700">Admin Log In</button>
+            </form>
+         `;
+    }
+    
+    function toggleAuthForm() {
+        const container = document.getElementById('auth-form-container');
+        const toggleLink = document.getElementById('toggle-link');
+        if (container.querySelector('form').id === 'login-form') {
+            container.innerHTML = renderSignupForm();
+            toggleLink.textContent = "Already have an account? Log In";
+        } else {
+            container.innerHTML = renderLoginForm();
+            toggleLink.textContent = "Don't have an account? Sign Up";
+        }
+    }
+    
+    function renderConsentView(step) {
+        let content = {};
+        let title = '';
+        let stepNumber = 0;
+        
+        switch (step) {
+            case 'tos-consent':
+                stepNumber = 1;
+                title = 'Terms of Service';
+                content = {
+                    text: 'By using this service, you agree to our Terms, including acceptable use policies and service limitations.',
+                    details: 'This document outlines the agreement between you and the application provider. Usage implies acceptance. We reserve the right to terminate accounts for misuse. Data integrity is prioritized, but absolute data loss prevention is not guaranteed.',
+                    agreeText: 'I Agree to the Terms'
+                };
+                break;
+            case 'data-usage-consent':
+                stepNumber = 2;
+                title = 'Required Data Usage';
+                content = {
+                    text: 'We require your **Email address** (for login/ID) and **IP address** (for security/anti-spam). This data is necessary to proceed.',
+                    details: 'Your data is stored in JSON files on the server. Your identity (name/email) is used for chat routing and display.',
+                    agreeText: 'I Understand & Agree to Data Usage'
+                };
+                break;
+            case 'e2e-info-consent':
+                stepNumber = 3;
+                title = 'Security & Data Model';
+                content = {
+                    text: 'All messages are labeled as having E2E encryption claims. User and chat data are stored in **JSON files** on the server.',
+                    details: 'We use your email, name, age, and IP address to display messages, manage contacts, and enable public feeds. Please be mindful of content shared.',
+                    agreeText: 'I Accept the Security Model'
+                };
+                break;
+            default:
+                return '';
+        }
+
+        return `
+            <div class="flex-grow flex items-center justify-center p-8 bg-gray-50">
+                <div class="w-full max-w-sm space-y-5 bg-white p-8 rounded-xl shadow-lg">
+                    <h2 class="text-2xl font-bold text-gray-800">${stepNumber}. ${title}</h2>
+                    <p class="text-gray-600">${content.text}</p>
+                    <div class="h-40 overflow-y-scroll border p-3 rounded text-sm bg-gray-100 text-gray-500">
+                        ${content.details}
+                    </div>
+                    <button onclick="handleConsent('${step}')" class="w-full btn-primary">${content.agreeText}</button>
+                    <button onclick="denyConsent()" class="w-full bg-gray-300 text-gray-700 p-3 rounded-lg font-semibold hover:bg-gray-400 transition">I Disagree / Exit</button>
+                </div>
+            </div>
+        `;
+    }
+
+    function renderDashboardView() {
+        if (!state.user || !state.dashboardData) return renderLoading();
+        
+        const chatListHTML = renderChatList();
+        
+        return `
+            <div class="flex w-full h-full">
+                <div class="w-80 border-r flex flex-col flex-shrink-0 bg-white">
+                    ${renderSidebarHeader()}
+                    
+                    <div id="chat-list" class="flex-grow overflow-y-auto custom-scroll">
+                        ${chatListHTML}
+                    </div>
+                </div>
+
+                <div id="main-content-area" class="flex-grow flex flex-col bg-gray-100">
+                    ${renderMainContent()}
+                </div>
+            </div>
+        `;
+    }
+    
+    function renderSidebarHeader() {
+         const pendingCount = state.user.pending_requests_in?.length || 0;
+         return `
+            <div class="p-4 bg-gray-800 text-white flex justify-between items-center shadow-md">
+                <div class="flex items-center">
+                    <img src="${state.user.profilePic || '/uploads/default.png'}" onerror="this.src='/uploads/default.png'" class="h-10 w-10 rounded-full object-cover mr-3">
+                    <h2 class="text-lg font-semibold">${state.user.name}</h2>
+                </div>
+                <div class="flex space-x-3">
+                    <button onclick="updateState({ view: 'feed' })" title="Public Video Feed" class="hover:text-gray-300">
+                        ${Icon('monitor-play-fill', 24)}
+                    </button>
+                    <button onclick="updateState({ view: 'search' })" title="Find Users / Requests" class="relative hover:text-gray-300">
+                        ${Icon('users-three', 24)}
+                        ${pendingCount > 0 ? `<span class="absolute top-0 right-0 h-2 w-2 rounded-full bg-red-500 border-2 border-gray-800"></span>` : ''}
+                    </button>
+                    <button onclick="logout()" title="Logout" class="hover:text-gray-300">
+                        ${Icon('sign-out-fill', 24)}
+                    </button>
+                </div>
+            </div>
+            <div class="p-2 border-b bg-gray-50">
+                <input type="text" placeholder="Search chats..." class="form-input p-2 text-sm">
+            </div>
+         `;
+    }
+    
+    function renderChatList() {
+        if (!state.dashboardData) return '';
+        
+        const { accepted, groups } = state.dashboardData.chats;
+        const allConversations = [
+            ...accepted.map(chat => ({ 
+                ...chat, 
+                isGroup: false, 
+                id: chat.chatId, 
+                name: chat.partnerName, 
+                partnerId: chat.partnerId 
+            })),
+            ...groups.map(group => ({ 
+                ...group, 
+                isGroup: true, 
+                id: group.groupId, 
+                name: group.groupName 
+            }))
+        ];
+        
+        // Sort by last message time (placeholder for now)
+        allConversations.sort((a, b) => (b.lastMessageTime || 0) - (a.lastMessageTime || 0));
+
+        if (allConversations.length === 0) {
+            return `<p class="text-center text-gray-500 p-4 text-sm">No active chats. Find users to start messaging!</p>`;
+        }
+        
+        return allConversations.map(conv => {
+            const isActive = conv.id === state.activeChatId;
+            const chatClass = isActive ? 'bg-blue-50 border-l-4 border-primary' : 'hover:bg-gray-50';
+            const icon = conv.isGroup ? Icon('users-three-fill', 20, 'text-gray-500') : Icon('user-fill', 20, 'text-gray-500');
+            const statusIndicator = state.activeUsers.get(conv.partnerId) ? 
+                '<span class="h-2 w-2 rounded-full bg-green-500 ml-1"></span>' : '';
+
+            return `
+                <div onclick="openChat('${conv.id}', '${conv.partnerId}', ${conv.isGroup})" class="flex items-center p-3 border-b cursor-pointer transition duration-150 ${chatClass}">
+                    <div class="h-10 w-10 rounded-full flex items-center justify-center bg-gray-200 text-gray-700 mr-3 shadow-sm">
+                        ${conv.name[0]}
+                    </div>
+                    <div class="flex-grow min-w-0">
+                        <div class="flex justify-between items-center">
+                            <p class="font-semibold text-gray-800 truncate">${sanitize(conv.name)}</p>
+                            ${statusIndicator}
+                        </div>
+                        <p class="text-sm text-gray-500 truncate">${sanitize(conv.lastMessage)}</p>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+
+    function renderMainContent() {
+        switch (state.view) {
+            case 'chat':
+                return renderChatWindow();
+            case 'search':
+                return renderSearchAndRequestView();
+            case 'feed':
+                return renderVideoFeedView();
+            case 'admin':
+                return renderAdminDashboard();
+            case 'dashboard':
+            default:
+                return renderWelcomeScreen();
+        }
+    }
+
+    function renderWelcomeScreen() {
+        return `
+            <div class="flex-grow flex items-center justify-center p-8 text-center">
+                <div class="text-gray-500 space-y-4">
+                    ${Icon('chats-circle', 80, 'mx-auto text-primary')}
+                    <h3 class="text-2xl font-semibold text-gray-700">Welcome to Secure Chat</h3>
+                    <p>Select a chat from the sidebar or click **Find Users** to start a new connection.</p>
+                </div>
+            </div>
+        `;
+    }
+
+    function renderChatWindow() {
+        if (!state.activeChatPartner) return renderWelcomeScreen();
+
+        const { name, isGroup, id } = state.activeChatPartner;
+        
+        const chatHeader = renderChatHeader();
+
+        return `
+            <div class="flex flex-col h-full">
+                ${chatHeader}
+
+                <div id="chat-messages" class="flex-grow overflow-y-auto p-4 space-y-3 bg-gray-100 custom-scroll">
+                    ${state.chatHistory.map(msg => {
+                        const isSender = msg.senderId === state.user.id;
+                        const bubbleClass = isSender ? 'bg-primary text-white self-end' : 'bg-white self-start shadow-sm';
+                        const time = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+                        return `
+                            <div class="flex w-full ${isSender ? 'justify-end' : 'justify-start'}">
+                                <div class="message-bubble ${bubbleClass}">
+                                    ${!isSender && isGroup ? `<p class="text-xs font-semibold text-blue-200 mb-1">${sanitize(msg.senderName)}</p>` : ''}
+                                    <p class="text-sm">${sanitize(msg.text)}</p>
+                                    <span class="text-right text-[10px] block mt-1 ${isSender ? 'text-blue-200' : 'text-gray-400'}">${time}</span>
+                                </div>
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+
+                <form id="message-form" onsubmit="sendMessage(event)" class="bg-white p-3 border-t flex items-center shadow-inner flex-shrink-0">
+                    <input
+                        type="text"
+                        id="message-input"
+                        placeholder="Type a message..."
+                        oninput="updateTempMessage(event)"
+                        value="${sanitize(state.tempMessage)}"
+                        required
+                        class="flex-grow p-3 border border-gray-200 rounded-full bg-gray-100 focus:outline-none focus:ring-2 focus:ring-primary"
+                    />
+                    <button
+                        type="submit"
+                        class="ml-3 p-3 btn-primary rounded-full hover:bg-blue-700 transition duration-150"
+                    >
+                        ${Icon('paper-plane-tilt-fill', 24)}
+                    </button>
+                </form>
+            </div>
+        `;
+    }
+    
+    function renderChatHeader() {
+        if (!state.activeChatPartner) return '';
+        const { name, isGroup, id, members } = state.activeChatPartner;
+        const partnerId = id; // Note: for 1:1, this is the partner's user ID.
+        
+        let statusText = '';
+        let statusClass = 'text-gray-400';
+        
+        if (!isGroup) {
+            const isOnline = state.activeUsers.get(partnerId);
+            statusText = isOnline ? 'Online' : 'Offline';
+            statusClass = isOnline ? 'text-green-500 font-semibold' : 'text-gray-400';
+        } else {
+            statusText = `${members?.length || '...'} Members`;
+        }
+
+        return `
+            <div class="p-4 bg-gray-800 text-white shadow-md flex items-center justify-between flex-shrink-0">
+                <div class="flex items-center">
+                    <button onclick="updateState({ view: 'dashboard', activeChatId: null, activeChatPartner: null })" class="md:hidden mr-3">
+                        ${Icon('arrow-left-fill', 24, 'text-white')}
+                    </button>
+                    <div class="h-10 w-10 rounded-full flex items-center justify-center mr-3 ${isGroup ? 'bg-indigo-500' : 'bg-primary'} font-bold">
+                        ${name[0]}
+                    </div>
+                    <div>
+                        <h2 class="text-lg font-semibold">${sanitize(name)}</h2>
+                        <p id="chat-partner-status" class="text-xs ${statusClass}">${statusText}</p>
+                    </div>
+                </div>
+                <div class="flex space-x-4">
+                    <button title="Video Call (Placeholder)" class="hover:text-gray-300">
+                        ${Icon('video-camera-fill', 24)}
+                    </button>
+                    <button title="Voice Call (Placeholder)" class="hover:text-gray-300">
+                        ${Icon('phone-call-fill', 24)}
+                    </button>
+                </div>
+            </div>
+        `;
+    }
+
+    function renderSearchAndRequestView() {
+        const pendingRequests = state.dashboardData?.pendingRequests || [];
+        
+        const renderRequests = () => {
+            if (pendingRequests.length === 0) {
+                return '<p class="text-sm text-yellow-700">No pending requests.</p>';
+            }
+            return `<ul class="space-y-2">${pendingRequests.map(req => `
+                <li class="p-3 border rounded-lg bg-white flex justify-between items-center shadow-sm">
+                    <p class="font-semibold text-gray-800">${sanitize(req.senderName)}</p>
+                    <div class="space-x-2">
+                        <button onclick="handleRequestAction('${req.senderId}', 'accept')" class="bg-green-500 text-white px-3 py-1 rounded-lg text-xs hover:bg-green-600 transition">Accept</button>
+                        <button onclick="handleRequestAction('${req.senderId}', 'deny')" class="bg-red-500 text-white px-3 py-1 rounded-lg text-xs hover:bg-red-600 transition">Deny</button>
+                    </div>
+                </li>
+            `).join('')}</ul>`;
+        };
+        
+        const renderSearchResults = () => {
+            if (state.searchResults.length === 0) {
+                return '<p class="text-center text-gray-500">Search for users by name or email.</p>';
+            }
+            return `<ul class="space-y-2">${state.searchResults.map(user => `
+                <li class="p-3 border rounded-lg bg-white flex justify-between items-center shadow-sm">
+                    <div>
+                        <p class="font-semibold">${sanitize(user.name)}</p>
+                        <p class="text-xs text-gray-500">${sanitize(user.email)}</p>
+                    </div>
+                    ${user.id !== state.user.id ? `<button onclick="sendChatRequest('${user.id}', '${user.name}')" class="btn-primary text-xs px-3 py-1">
+                        Send Request
+                    </button>` : `<span class="text-xs text-primary font-semibold"> (You) </span>`}
+                </li>
+            `).join('')}</ul>`;
+        };
+
+        return `
+            <div class="flex-grow flex flex-col p-6 space-y-6 overflow-y-auto custom-scroll">
+                <div class="flex items-center justify-between border-b pb-3">
+                    <h2 class="text-2xl font-bold text-gray-800">${Icon('users-three', 26, 'inline-block mr-2')}Find Users & Requests</h2>
+                    <button onclick="updateState({ view: 'dashboard' })" class="bg-gray-200 text-gray-700 p-2 rounded-lg text-sm hover:bg-gray-300 transition">
+                        ${Icon('chats-circle', 20, 'inline-block mr-1')} Back to Chats
+                    </button>
+                </div>
+                
+                <div class="bg-yellow-100 border border-yellow-300 p-4 rounded-xl shadow-md space-y-3">
+                    <h3 class="font-bold text-lg text-yellow-800">Incoming Chat Requests (${pendingRequests.length})</h3>
+                    ${renderRequests()}
+                </div>
+
+                <div class="border p-4 rounded-xl bg-white shadow-md space-y-3">
+                    <h3 class="font-bold text-lg text-gray-700">Search for New Connections</h3>
+                    <form id="user-search-form" onsubmit="handleUserSearch(event)" class="flex space-x-2">
+                        <input type="text" id="search-query" placeholder="Search user by email or name..." required class="form-input flex-grow">
+                        <button type="submit" class="btn-primary px-4">
+                            ${Icon('magnifying-glass', 20)}
+                        </button>
+                    </form>
+                    <div id="search-results" class="mt-3">
+                        ${renderSearchResults()}
+                    </div>
+                </div>
+                
+                <div class="border p-4 rounded-xl bg-white shadow-md space-y-3">
+                    <h3 class="font-bold text-lg text-gray-700">My Profile</h3>
+                    <div class="flex items-center space-x-4">
+                        <img id="profile-pic-display" src="${state.user.profilePic || '/uploads/default.png'}" onerror="this.src='/uploads/default.png'" class="h-16 w-16 rounded-full object-cover shadow-md">
+                        <div>
+                            <p class="text-lg font-semibold">${sanitize(state.user.name)}</p>
+                            <p class="text-sm text-gray-600">${sanitize(state.user.email)}</p>
+                        </div>
+                    </div>
+                    <form onsubmit="handleProfilePicUpload(event)" class="space-y-2 pt-2">
+                        <input type="file" id="profile-pic-file" accept="image/png, image/jpeg" required class="w-full text-sm">
+                        <button type="submit" class="btn-primary text-sm px-3 py-1">Update Picture</button>
+                    </form>
+                </div>
+            </div>
+        `;
+    }
+
+    function renderVideoFeedView() {
+        const renderFeed = () => {
+            if (state.videoFeed.length === 0) {
+                return '<p class="text-center text-gray-500">No videos posted yet. Be the first!</p>';
+            }
+            return state.videoFeed.map(post => `
+                <div class="p-4 border rounded-xl bg-white shadow-sm">
+                    <p class="font-semibold text-gray-800">${sanitize(post.posterName)}</p>
+                    <p class="text-sm text-gray-600 mb-2">${sanitize(post.caption)}</p>
+                    <a href="${sanitize(post.url)}" target="_blank" class="text-primary hover:underline text-sm break-all">${sanitize(post.url)}</a>
+                    <p class="text-xs text-gray-400 mt-2">${new Date(post.timestamp).toLocaleString()}</p>
+                </div>
+            `).join('');
+        };
+        
+        return `
+            <div class="flex-grow flex flex-col p-6 space-y-6 overflow-y-auto custom-scroll">
+                <div class="flex items-center justify-between border-b pb-3">
+                    <h2 class="text-2xl font-bold text-gray-800">${Icon('monitor-play', 26, 'inline-block mr-2')}Public Video Feed</h2>
+                    <button onclick="updateState({ view: 'dashboard' })" class="bg-gray-200 text-gray-700 p-2 rounded-lg text-sm hover:bg-gray-300 transition">
+                        ${Icon('chats-circle', 20, 'inline-block mr-1')} Back to Chats
+                    </button>
+                </div>
+                
+                <form id="post-video-form" onsubmit="handleVideoPost(event)" class="border p-4 rounded-xl bg-white shadow-md space-y-3">
+                    <h3 class="font-bold text-lg text-gray-700">Post a Video Link</h3>
+                    <input type="url" id="video-url" placeholder="YouTube/Vimeo URL" required class="form-input">
+                    <input type="text" id="video-caption" placeholder="Caption" class="form-input">
+                    <button type="submit" class="btn-primary text-sm px-3 py-1">Post to Feed</button>
+                </form>
+
+                <div id="video-feed-list" class="space-y-4">
+                    ${renderFeed()}
+                </div>
+            </div>
+        `;
+    }
+
+    function renderAdminDashboard() {
+        const sensitiveDataAvailable = !!state.adminKeyInput && state.adminKeyInput === ADMIN_SECRET_KEY;
+        
+        const renderUserList = () => {
+            if (state.adminViewUsers.length === 0) {
+                return '<p class="text-center text-gray-500">No users found or key is required.</p>';
+            }
+            
+            return state.adminViewUsers.map(user => `
+                <li class="p-3 border rounded-lg flex justify-between items-start bg-white shadow-sm">
+                    <div>
+                        <p class="font-semibold">${sanitize(user.name)} (${user.email})</p>
+                        <p class="text-sm text-gray-500">ID: ${user.id}</p>
+                        <p class="text-xs ${user.isAdmin ? 'text-red-600' : 'text-primary'}">Role: ${user.isAdmin ? 'ADMIN' : 'Standard'}</p>
+                        ${user.sensitiveData ? `
+                            <details class="mt-2 text-xs">
+                                <summary class="font-bold text-yellow-700 cursor-pointer">View Sensitive Data</summary>
+                                <pre class="mt-1 bg-yellow-50 p-2 rounded break-all whitespace-pre-wrap">${JSON.stringify(user.sensitiveData, null, 2)}</pre>
+                            </details>
+                        ` : ''}
+                    </div>
+                    ${!user.isAdmin ? `<button onclick="deleteUser('${user.id}')" class="bg-red-500 text-white p-2 rounded-lg text-sm hover:bg-red-600 transition flex-shrink-0">Delete</button>` : ''}
+                </li>
+            `).join('');
+        };
+        
+        return `
+            <div class="flex-grow flex flex-col p-6 space-y-6 overflow-y-auto custom-scroll">
+                <div class="flex items-center justify-between border-b pb-3">
+                    <h2 class="text-2xl font-bold text-red-700">${Icon('key-fill', 26, 'inline-block mr-2')}Admin Dashboard</h2>
+                    <button onclick="logout()" class="bg-gray-200 text-gray-700 p-2 rounded-lg text-sm hover:bg-gray-300 transition">
+                        ${Icon('sign-out-fill', 20, 'inline-block mr-1')} Logout
+                    </button>
+                </div>
+                
+                <div class="bg-red-50 p-4 rounded-xl shadow-md flex justify-between items-center">
+                    <p class="font-semibold text-red-700">Total Users: ${state.adminViewUsers.length}</p>
+                    <button onclick="showAdminSecretPrompt()" class="btn-primary bg-indigo-600 hover:bg-indigo-700 text-sm">
+                        ${sensitiveDataAvailable ? 'Refresh Data (Sensitive)' : 'View Sensitive Data'}
+                    </button>
+                </div>
+
+                <ul class="space-y-3 p-3 border rounded-xl bg-gray-100">
+                    ${renderUserList()}
+                </ul>
+            </div>
+        `;
+    }
+
+    function renderLoading() {
+        return `
+            <div class="flex-grow flex items-center justify-center p-8">
+                <p class="text-xl font-semibold text-primary">${Icon('circle-notch', 24, 'animate-spin mr-2')} Loading...</p>
+            </div>
+        `;
+    }
+    
+    // --- Main Renderer ---
+
+    function render() {
+        const appEl = document.getElementById('app');
+        if (!appEl) return;
+        
+        switch (state.view) {
+            case 'auth':
+                appEl.innerHTML = renderAuthView();
+                break;
+            case 'consent':
+                appEl.innerHTML = renderConsentView(state.consentStep);
+                break;
+            case 'dashboard':
+            case 'chat':
+            case 'search':
+            case 'feed':
+                appEl.innerHTML = renderDashboardView();
+                // Ensure chat window appears correctly on mobile if view is 'chat'
+                if (state.view === 'chat' && window.innerWidth < 768) {
+                    const sidebar = document.getElementById('sidebar');
+                    const mainContent = document.getElementById('main-content-area');
+                    if (sidebar && mainContent) {
+                         // Hide sidebar and make main content full width
+                        sidebar.classList.add('hidden');
+                        mainContent.classList.remove('flex-grow');
+                        mainContent.classList.add('w-full');
+                    }
+                } else if (window.innerWidth < 768) {
+                     // Ensure sidebar is shown for dashboard/search/feed on mobile
+                    const sidebar = document.getElementById('sidebar');
+                    const mainContent = document.getElementById('main-content-area');
+                    if (sidebar && mainContent) {
+                        sidebar.classList.remove('hidden');
+                        mainContent.classList.add('hidden');
+                    }
+                }
+                break;
+            case 'admin':
+                appEl.innerHTML = renderAdminDashboard();
+                break;
+            default:
+                appEl.innerHTML = renderLoading();
+        }
+    }
+
+    // --- Application Entry Point ---
+    window.onload = checkSession;
+</script>
+</body>
+</html>
