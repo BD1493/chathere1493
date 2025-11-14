@@ -23,7 +23,7 @@ function readData(filePath) {
         const data = fs.readFileSync(filePath, 'utf8');
         
         // --- CRITICAL FIX: Handle empty file or non-JSON content gracefully ---
-        if (data.trim() === '' || data.trim()[0] !== '[' && data.trim()[0] !== '{') {
+        if (data.trim() === '' || (data.trim()[0] !== '[' && data.trim()[0] !== '{')) {
             // Determine the appropriate default structure based on the file type
             if (filePath === USER_FILE || filePath === VIDEO_FEED_FILE) {
                 return [];
@@ -77,12 +77,11 @@ function init() {
     // Check if a default admin exists, create one if not
     let users = readData(USER_FILE);
     
-    // --- SECOND CRITICAL FIX: Ensure 'users' is an array before using .find() ---
+    // Ensure users is an array before using .find()
     if (!Array.isArray(users)) {
         users = [];
     }
-    // --- END SECOND CRITICAL FIX ---
-
+    
     if (!users.find(u => u.isAdmin)) {
         const adminId = crypto.randomUUID();
         const adminUser = {
@@ -96,7 +95,8 @@ function init() {
             accepted_chats: [],
             groups: [],
             pending_requests_in: [],
-            pending_requests_out: []
+            pending_requests_out: [],
+            tosAccepted: true // ADDED TERMS OF SERVICE
         };
         users.push(adminUser);
         writeData(USER_FILE, users);
@@ -109,10 +109,15 @@ function hashPassword(password) {
     return crypto.createHash('sha256').update(password).digest('hex');
 }
 
-async function createUser({ email, name, age, password }) {
+async function createUser({ email, name, age, password, tosAccepted }) { // Accepts tosAccepted
     const users = readData(USER_FILE);
     if (users.find(u => u.email === email)) {
         return { error: 'Email already registered.' };
+    }
+    
+    // ADDED: Terms of Service check
+    if (!tosAccepted) {
+        return { error: 'You must accept the Terms of Service to sign up.' };
     }
 
     const userId = crypto.randomUUID();
@@ -127,7 +132,8 @@ async function createUser({ email, name, age, password }) {
         accepted_chats: [],
         groups: [],
         pending_requests_in: [],
-        pending_requests_out: []
+        pending_requests_out: [],
+        tosAccepted: true // ADDED TERMS OF SERVICE
     };
 
     users.push(newUser);
@@ -179,7 +185,8 @@ async function getAllUsers(includeSensitive) {
             email: user.email,
             name: user.name,
             isAdmin: user.isAdmin,
-            isVerified: true // Placeholder
+            isVerified: true, // Placeholder: No email verification needed
+            tosAccepted: user.tosAccepted // Expose TOS status
         };
         if (includeSensitive) {
             cleanUser.sensitiveData = {
