@@ -21,9 +21,28 @@ function ensureFileExists(filePath, defaultContent) {
 function readData(filePath) {
     try {
         const data = fs.readFileSync(filePath, 'utf8');
+        
+        // --- CORRECTED CHECK: Handle empty file data before JSON.parse ---
+        if (data.trim() === '') {
+            // Return an empty array or object based on the file's expected structure
+            // Users and Video Feed are arrays ([]), Chats is an object ({})
+            if (filePath === USER_FILE || filePath === VIDEO_FEED_FILE) {
+                return [];
+            } else if (filePath === CHAT_FILE) {
+                return { chats: [], groups: [], chatRequests: [], messages: {} };
+            }
+        }
+        // --- END CORRECTED CHECK ---
+        
         return JSON.parse(data);
     } catch (e) {
-        console.error(`Error reading ${filePath}:`, e);
+        console.error(`Error reading or parsing ${filePath}:`, e);
+        // Fallback: Safely return the empty structure if parsing fails
+        if (filePath === USER_FILE || filePath === VIDEO_FEED_FILE) {
+            return [];
+        } else if (filePath === CHAT_FILE) {
+            return { chats: [], groups: [], chatRequests: [], messages: {} };
+        }
         return [];
     }
 }
