@@ -1,327 +1,336 @@
-const express = require('express');
-const http = require('http');
-const socketIo = require('socket.io');
-const bodyParser = require('body-parser');
-const multer = require('multer');
+const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const dataStore = require('./data'); 
 
-const app = express();
-const server = http.createServer(app);
-const io = socketIo(server);
+// Directory for data files
+const DATA_DIR = path.join(__dirname, 'data');
 
-// --- Configuration and Security ---
-const API_SECRET_KEY = 'your_super_secret_api_key_12345'; // MUST MATCH FRONTEND
-const ADMIN_SECRET_KEY = 'admin_master_access_key';
-const PORT = 3000;
+// File paths
+const USER_FILE = path.join(DATA_DIR, 'users.json');
+const CHAT_FILE = path.join(DATA_DIR, 'chats.json');
+const VIDEO_FEED_FILE = path.join(DATA_DIR, 'video_feed.json');
 
-// Middleware to check API key
-const authenticateAPI = (req, res, next) => {
-    const authHeader = req.headers.authorization;
-    if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        return res.status(401).json({ error: 'Authentication required' });
+// --- Utility Functions ---
+
+function ensureFileExists(filePath, defaultContent) {
+    if (!fs.existsSync(filePath)) {
+        fs.writeFileSync(filePath, JSON.stringify(defaultContent, null, 2));
     }
-    const token = authHeader.split(' ')[1];
-    if (token !== API_SECRET_KEY) {
-        return res.status(403).json({ error: 'Invalid API Key' });
+}
+
+function readData(filePath) {
+    try {
+        const data = fs.readFileSync(filePath, 'utf8');
+        return JSON.parse(data);
+    } catch (e) {
+        console.error(`Error reading ${filePath}:`, e);
+        return [];
     }
-    next();
+}
+
+function writeData(filePath, data) {
+    try {
+        fs.writeFileSync(filePath, JSON.stringify(data, null, 2));
+    } catch (e) {
+        console.error(`Error writing ${filePath}:`, e);
+    }
+}
+
+// --- Initialization ---
+
+/**
+ * Ensures data directory and JSON files exist.
+ */
+function init() {
+    if (!fs.existsSync(DATA_DIR)) {
+        fs.mkdirSync(DATA_DIR);
+    }
+    // Initialize data files
+    ensureFileExists(USER_FILE, { users: [] });
+    ensureFileExists(CHAT_FILE, { chats: [], groups: [], messages: {} });
+    ensureFileExists(VIDEO_FEED_FILE, []);
+}
+
+// --- User Management ---
+
+async function createUser({ email, name, age, password, tosAccepted, isVerified = false }) {
+    const usersData = readData(USER_FILE);
+
+    if (usersData.users.some(u => u.email === email)) {
+        return { error: 'Email already exists.' };
+    }
+
+    if (!tosAccepted) {
+        return { error: 'You must accept the Terms of Service.' };
+    }
+    
+    // NOTE: In a real app, you would hash the password (e.g., using bcrypt)
+    
+    const newUser = {
+        id: crypto.randomUUID(),
+        email: email,
+        name: name,
+        age: age,
+        passwordHash: password, // For simplicity, storing as plain text (BAD PRACTICE, use bcrypt!)
+        isAdmin: false,
+        profilePic: null,
+        pending_requests_in: [],
+        pending_requests_out: [],
+        isVerified: isVerified // NEW FIELD: Default to false, but set to true if domain is exempted
+    };
+
+    usersData.users.push(newUser);
+    writeData(USER_FILE, usersData);
+    
+    return { success: true };
+}
+
+async function findUserByCredentials(email, password) {
+    const usersData = readData(USER_FILE);
+    // In a real app, compare password with bcrypt hash
+    const user = usersData.users.find(u => u.email === email && u.passwordHash === password);
+    // if (!user || user.isVerified === false) return null; // Add verification check if needed
+    return user;
+}
+
+async function findUserByEmail(email) {
+    const usersData = readData(USER_FILE);
+    return usersData.users.find(u => u.email === email);
+}
+
+async function findUserById(id) {
+    const usersData = readData(USER_FILE);
+    return usersData.users.find(u => u.id === id);
+}
+
+async function searchUsers(query) {
+    const usersData = readData(USER_FILE);
+    const q = query.toLowerCase();
+    return usersData.users.filter(u => 
+        u.email.toLowerCase().includes(q) || 
+        u.name.toLowerCase().includes(q)
+    );
+}
+
+async function getAllUsers(includeSensitiveData = false) {
+    const usersData = readData(USER_FILE);
+    if (includeSensitiveData) {
+        return usersData.users;
+    }
+    // Filter sensitive data for general admin list
+    return usersData.users.map(u => ({
+        id: u.id,
+        email: u.email,
+        name: u.name,
+        isAdmin: u.isAdmin,
+    }));
+}
+
+async function deleteUser(userId) {
+    const usersData = readData(USER_FILE);
+    usersData.users = usersData.users.filter(u => u.id !== userId);
+    writeData(USER_FILE, usersData);
+    // TODO: Also delete related chats, messages, and video posts
+}
+
+async function updateUserProfilePic(userId, filePath) {
+    const usersData = readData(USER_FILE);
+    const user = usersData.users.find(u => u.id === userId);
+    if (user) {
+        user.profilePic = filePath;
+        writeData(USER_FILE, usersData);
+    }
+}
+
+// --- Dashboard Data Retrieval ---
+async function getUserDashboardData(userId) {
+    const usersData = readData(USER_FILE);
+    const chatsData = readData(CHAT_FILE);
+    
+    const user = usersData.users.find(u => u.id === userId);
+    if (!user) throw new Error('User not found.');
+
+    const allUsers = usersData.users.map(u => ({ id: u.id, name: u.name, profilePic: u.profilePic }));
+    
+    // Accepted Chats (1-on-1)
+    const acceptedChats = chatsData.chats
+        .filter(c => c.participants.includes(userId))
+        .map(chat => {
+            const partnerId = chat.participants.find(id => id !== userId);
+            const lastMessage = chatsData.messages[chat.chatId] 
+                ? chatsData.messages[chat.chatId].slice(-1)[0]?.text || 'Start chatting!'
+                : 'Start chatting!';
+            return {
+                chatId: chat.chatId,
+                participants: chat.participants,
+                name: allUsers.find(u => u.id === partnerId)?.name || 'Unknown User',
+                lastMessage: lastMessage,
+                type: 'individual'
+            };
+        });
+        
+    // Groups (Simplified)
+    const groups = chatsData.groups
+        .filter(g => g.members.includes(userId))
+        .map(group => {
+            return {
+                groupId: group.groupId,
+                name: group.name,
+                type: 'group'
+                // Add last message logic here if groups had messages
+            };
+        });
+
+    return {
+        user,
+        users: allUsers, // List of all users (for displaying chat partner names)
+        chats: {
+            accepted: acceptedChats,
+        },
+        groups: groups,
+        pending_requests_in: user.pending_requests_in
+    };
+}
+
+// --- Chat Request Management ---
+
+async function sendChatRequest(senderId, senderName, targetId) {
+    const usersData = readData(USER_FILE);
+    const targetUser = usersData.users.find(u => u.id === targetId);
+    const senderUser = usersData.users.find(u => u.id === senderId);
+
+    if (!targetUser || !senderUser) throw new Error('User not found.');
+    
+    // Check if request already exists (inbound or outbound)
+    if (targetUser.pending_requests_in.some(r => r.senderId === senderId)) {
+        throw new Error('Request already sent.');
+    }
+    if (senderUser.pending_requests_out.some(r => r.targetId === targetId)) {
+        throw new Error('Request already sent.');
+    }
+
+    const newRequest = { senderId, senderName, timestamp: Date.now() };
+    
+    // Add to target's inbound list
+    targetUser.pending_requests_in.push(newRequest);
+    
+    // Add to sender's outbound list (for tracking)
+    senderUser.pending_requests_out.push({ targetId, timestamp: Date.now() });
+
+    writeData(USER_FILE, usersData);
+}
+
+async function handleChatRequest(targetId, senderId, action) {
+    const usersData = readData(USER_FILE);
+    const targetUser = usersData.users.find(u => u.id === targetId);
+    const senderUser = usersData.users.find(u => u.id === senderId);
+
+    if (!targetUser || !senderUser) return { error: 'User not found.' };
+
+    // Remove from target's inbound list
+    targetUser.pending_requests_in = targetUser.pending_requests_in.filter(r => r.senderId !== senderId);
+    
+    // Remove from sender's outbound list
+    senderUser.pending_requests_out = senderUser.pending_requests_out.filter(r => r.targetId !== targetId);
+
+    let newChat = null;
+    
+    if (action === 'accept') {
+        const chatsData = readData(CHAT_FILE);
+        const chatId = crypto.randomUUID();
+        
+        newChat = {
+            chatId: chatId,
+            participants: [targetId, senderId],
+            type: 'individual'
+        };
+        
+        chatsData.chats.push(newChat);
+        chatsData.messages[chatId] = []; // Initialize message history
+        writeData(CHAT_FILE, chatsData);
+    }
+    
+    writeData(USER_FILE, usersData);
+    return { success: true, chat: newChat };
+}
+
+// --- Message Management ---
+
+async function getChatHistory(chatId) {
+    const chatsData = readData(CHAT_FILE);
+    return chatsData.messages[chatId] || [];
+}
+
+async function addMessage(chatId, message) {
+    const chatsData = readData(CHAT_FILE);
+    
+    if (!chatsData.messages[chatId]) {
+        chatsData.messages[chatId] = [];
+    }
+
+    const savedMessage = {
+        id: crypto.randomUUID(),
+        chatId: chatId,
+        senderId: message.senderId,
+        senderName: message.senderName,
+        text: message.text,
+        timestamp: Date.now()
+    };
+    
+    chatsData.messages[chatId].push(savedMessage);
+    writeData(CHAT_FILE, chatsData);
+    
+    return savedMessage;
+}
+
+async function getChat(chatId) {
+    const chatsData = readData(CHAT_FILE);
+    return chatsData.chats.find(c => c.chatId === chatId);
+}
+
+async function getGroup(groupId) {
+    const chatsData = readData(CHAT_FILE);
+    return chatsData.groups.find(g => g.groupId === groupId);
+}
+
+// --- Video Feed Management ---
+
+async function addVideoPost({ url, caption, posterId, posterName }) {
+    const feed = readData(VIDEO_FEED_FILE);
+    const newPost = {
+        id: crypto.randomUUID(),
+        url,
+        caption,
+        posterId,
+        posterName,
+        timestamp: Date.now()
+    };
+    feed.push(newPost);
+    writeData(VIDEO_FEED_FILE, feed);
+}
+
+async function getVideoFeed() {
+    return readData(VIDEO_FEED_FILE);
+}
+
+
+module.exports = {
+    init,
+    createUser,
+    findUserByCredentials,
+    findUserByEmail,
+    findUserById,
+    searchUsers,
+    getAllUsers,
+    deleteUser,
+    updateUserProfilePic,
+    getUserDashboardData,
+    sendChatRequest,
+    handleChatRequest,
+    getChatHistory,
+    addMessage,
+    getChat,
+    getGroup,
+    addVideoPost,
+    getVideoFeed
 };
-
-// --- Setup ---
-app.use(bodyParser.json());
-
-// **CRITICAL FIX:** Serve the root directory (where index.html is) as static content
-app.use(express.static(__dirname));
-
-// Serve profile pictures from the 'uploads' folder
-app.use('/uploads', express.static(path.join(__dirname, 'uploads'))); 
-
-// Initialize data store and create admin if necessary
-dataStore.init();
-
-// --- Multer for File Uploads ---
-const storage = multer.diskStorage({
-    destination: path.join(__dirname, 'uploads'),
-    filename: (req, file, cb) => {
-        // Use a unique name for the file
-        const extension = path.extname(file.originalname);
-        cb(null, `${req.body.userId}-${Date.now()}${extension}`);
-    }
-});
-const upload = multer({ storage: storage });
-
-
-// =======================================================================
-// --- API Routes (Authenticated) ---
-// =======================================================================
-
-// Middleware to protect all API routes
-app.use('/api', authenticateAPI);
-
-// --- AUTH & USER ROUTES ---
-
-app.post('/api/auth/signup', async (req, res) => {
-    try {
-        const { email, name, age, password } = req.body;
-        if (!email || !name || !age || !password) {
-            return res.status(400).json({ error: 'Missing required fields' });
-        }
-        if (parseInt(age) < 14) {
-             return res.status(400).json({ error: 'Must be 14 or older to sign up.' });
-        }
-        
-        const result = await dataStore.createUser({ email, name, age, password });
-        if (result.error) {
-            return res.status(409).json({ error: result.error });
-        }
-        res.json({ success: true, message: 'User created. Please log in.' });
-    } catch (e) {
-        res.status(500).json({ error: 'Server error during signup.' });
-    }
-});
-
-app.post('/api/auth/login', async (req, res) => {
-    try {
-        const { email, password } = req.body;
-        const user = await dataStore.findUserByCredentials(email, password);
-        if (!user) {
-            return res.status(401).json({ error: 'Invalid email or password.' });
-        }
-        // Return a simplified user object for the frontend
-        const { password: _, ...userToSend } = user;
-        res.json({ success: true, user: userToSend });
-    } catch (e) {
-        res.status(500).json({ error: 'Server error during login.' });
-    }
-});
-
-app.get('/api/users/:userId', async (req, res) => {
-    try {
-        const user = await dataStore.findUserById(req.params.userId);
-        if (!user) return res.status(404).json({ error: 'User not found.' });
-        const { password: _, ...userToSend } = user;
-        res.json({ success: true, user: userToSend });
-    } catch (e) {
-        res.status(500).json({ error: 'Server error.' });
-    }
-});
-
-app.get('/api/users/:userId/dashboard', async (req, res) => {
-    try {
-        const data = await dataStore.getUserDashboardData(req.params.userId);
-        const user = await dataStore.findUserById(req.params.userId); // Re-fetch user to get updated requests count
-        res.json({ ...data, user });
-    } catch (e) {
-        res.status(500).json({ error: e.message || 'Failed to fetch dashboard data.' });
-    }
-});
-
-app.get('/api/users/search', async (req, res) => {
-    try {
-        const users = await dataStore.searchUsers(req.query.query);
-        // Remove sensitive info before sending
-        const safeUsers = users.map(({ id, name, email }) => ({ id, name, email }));
-        res.json({ success: true, users: safeUsers });
-    } catch (e) {
-        res.status(500).json({ error: 'Server error during search.' });
-    }
-});
-
-app.post('/api/profile/upload_pic', upload.single('profile_pic'), async (req, res) => {
-    try {
-        if (!req.file) {
-            return res.status(400).json({ error: 'No file uploaded.' });
-        }
-        const filePath = `/uploads/${req.file.filename}`;
-        await dataStore.updateUserProfilePic(req.body.userId, filePath);
-        res.json({ success: true, message: 'Profile picture updated.', filePath });
-    } catch (e) {
-        res.status(500).json({ error: 'Error processing upload.' });
-    }
-});
-
-
-// --- CHAT & REQUESTS ROUTES ---
-
-app.post('/api/chat/request', async (req, res) => {
-    try {
-        const { senderId, senderName, targetId } = req.body;
-        await dataStore.sendChatRequest(senderId, senderName, targetId);
-        res.json({ success: true, message: 'Chat request sent.' });
-    } catch (e) {
-        res.status(400).json({ error: e.message || 'Failed to send request.' });
-    }
-});
-
-app.post('/api/chat/handle_request', async (req, res) => {
-    try {
-        const { targetId, senderId, action } = req.body; // action: 'accept' or 'deny'
-        await dataStore.handleChatRequest(targetId, senderId, action);
-        res.json({ success: true, message: `Request ${action}ed.` });
-    } catch (e) {
-        res.status(500).json({ error: e.message || 'Failed to handle request.' });
-    }
-});
-
-app.get('/api/chat/history/:chatId', async (req, res) => {
-    try {
-        const messages = await dataStore.getChatHistory(req.params.chatId);
-        res.json({ success: true, messages });
-    } catch (e) {
-        res.status(500).json({ error: 'Failed to retrieve chat history.' });
-    }
-});
-
-// --- VIDEO FEED ROUTES ---
-
-app.post('/api/videos/post', async (req, res) => {
-    try {
-        const { url, caption, posterId, posterName } = req.body;
-        if (!url || !posterId) {
-            return res.status(400).json({ error: 'Missing video URL or poster ID.' });
-        }
-        await dataStore.addVideoPost({ url, caption, posterId, posterName });
-        res.json({ success: true, message: 'Video post added.' });
-    } catch (e) {
-        res.status(500).json({ error: 'Failed to add video post.' });
-    }
-});
-
-app.get('/api/videos/feed', async (req, res) => {
-    try {
-        // Simple feed - return latest 10
-        const feed = await dataStore.getVideoFeed();
-        // Sort by timestamp descending
-        const latestFeed = feed.sort((a, b) => b.timestamp - a.timestamp).slice(0, 10);
-        res.json({ success: true, feed: latestFeed });
-    } catch (e) {
-        res.status(500).json({ error: 'Failed to retrieve video feed.' });
-    }
-});
-
-// --- ADMIN ROUTES ---
-
-app.post('/api/admin/users', async (req, res) => {
-    try {
-        const { adminKey } = req.body;
-        if (adminKey !== ADMIN_SECRET_KEY) {
-            return res.status(403).json({ error: 'Invalid admin key.' });
-        }
-        
-        // Pass 'true' to include sensitive data in the response
-        const users = await dataStore.getAllUsers(true); 
-        res.json({ success: true, users });
-    } catch (e) {
-        res.status(500).json({ error: 'Failed to retrieve admin data.' });
-    }
-});
-
-app.post('/api/admin/delete', async (req, res) => {
-    try {
-        const { userId } = req.body;
-        // In a production app, we would verify the requester is an admin
-        // For this local app, we assume API key + knowledge of this route is enough
-        
-        await dataStore.deleteUser(userId);
-        res.json({ success: true, message: 'User deleted.' });
-    } catch (e) {
-        res.status(500).json({ error: 'Failed to delete user.' });
-    }
-});
-
-
-// =======================================================================
-// --- Socket.IO Real-Time Communication ---
-// =======================================================================
-
-// Map to track active user IDs to their socket IDs (for direct messaging)
-const activeUsers = new Map(); 
-
-io.use((socket, next) => {
-    const token = socket.handshake.auth.token;
-    if (token) {
-        socket.userId = token;
-        return next();
-    }
-    next(new Error("Authentication error"));
-});
-
-io.on('connection', (socket) => {
-    const userId = socket.userId;
-    activeUsers.set(userId, socket.id);
-    console.log(`User ${userId} connected. Total active: ${activeUsers.size}`);
-
-    // Notify all other users that this user is online
-    socket.broadcast.emit('user_status_update', { userId, isOnline: true });
-
-    // Handle new messages
-    socket.on('send_message', async (message, callback) => {
-        try {
-            const savedMessage = await dataStore.addMessage(message.chatId, message);
-            
-            // 1. Send the message back to the sender
-            socket.emit('new_message', savedMessage);
-
-            if (message.isGroup) {
-                // 2. If group chat, broadcast to all other group members
-                const group = await dataStore.getGroup(message.chatId);
-                group.members.forEach(memberId => {
-                    if (memberId !== userId) {
-                        const targetSocketId = activeUsers.get(memberId);
-                        if (targetSocketId) {
-                             io.to(targetSocketId).emit('new_message', savedMessage);
-                        }
-                    }
-                });
-            } else {
-                // 3. If 1-on-1, find partner and send
-                const chat = await dataStore.getChat(message.chatId);
-                const partnerId = chat.participants.find(id => id !== userId);
-                const targetSocketId = activeUsers.get(partnerId);
-
-                if (targetSocketId) {
-                    io.to(targetSocketId).emit('new_message', savedMessage);
-                }
-            }
-            // Send back success acknowledgement to the sender
-            callback({ success: true });
-        } catch (e) {
-            console.error('Error sending message:', e);
-            callback({ success: false, error: 'Failed to save or send message.' });
-        }
-    });
-
-    // Handle chat request notification
-    socket.on('notify_request', (data) => {
-        const targetSocketId = activeUsers.get(data.userId);
-        if (targetSocketId) {
-            io.to(targetSocketId).emit('request_update', { userId: data.userId });
-        }
-    });
-
-    // Handle status change request from client
-    socket.on('user_status_change', (data) => {
-        socket.broadcast.emit('user_status_update', data);
-    });
-
-    // Handle check status request (for newly opened chat)
-    socket.on('check_status', (targetId) => {
-        const isOnline = activeUsers.has(targetId);
-        socket.emit('user_status_update', { userId: targetId, isOnline });
-    });
-
-    // Handle disconnection
-    socket.on('disconnect', () => {
-        activeUsers.delete(userId);
-        console.log(`User ${userId} disconnected. Total active: ${activeUsers.size}`);
-        // Notify others that this user is offline
-        socket.broadcast.emit('user_status_update', { userId, isOnline: false });
-    });
-});
-
-// --- Server Start ---
-server.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-});
