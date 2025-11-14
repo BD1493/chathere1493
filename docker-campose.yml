@@ -1,0 +1,40 @@
+version: '3.8'
+
+services:
+  # 1. PHP/Web Server: Handles HTTP traffic (index.html, api.php, uploads)
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.php # Uses the PHP configuration below
+    container_name: php_api_server
+    # Map host port 8080 to container port 8080 (for frontend and API access)
+    ports:
+      - "8080:8080" 
+    # Mount files so changes update immediately
+    volumes:
+      - .:/var/www/html 
+    restart: always
+    # Ensure it's healthy before traffic starts
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # 2. Node.js Socket Server: Handles WebSocket traffic on port 3001
+  socket:
+    build:
+      context: .
+      dockerfile: Dockerfile.node # Uses the Node.js configuration below
+    container_name: socket_server
+    # Map host port 3001 to container port 3001 (for Socket.IO access)
+    ports:
+      - "3001:3001" 
+    # Mount files for dev environment
+    volumes:
+      - ./socket_server.js:/usr/src/app/socket_server.js
+      - ./package.json:/usr/src/app/package.json
+    restart: always
+
+# How to run: Execute 'docker compose up --build' in your project root.
+# Your application will be accessible at http://localhost:8080
