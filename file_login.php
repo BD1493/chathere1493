@@ -1,0 +1,1 @@
+<form method='POST' action='api/file_login.php'><input name='user' placeholder='Username'><input type='password' name='pass' placeholder='Password'><button>Login / Register</button></form>

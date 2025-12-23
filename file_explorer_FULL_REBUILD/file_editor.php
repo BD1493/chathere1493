@@ -1,0 +1,1 @@
+<form method='POST' action='api/file_create.php'><input name='name' placeholder='Filename'><textarea name='content'></textarea><button>Save</button></form>

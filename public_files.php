@@ -1,0 +1,1 @@
+<h1>Public Documents</h1><?php if(file_exists('data/file_public.json')){foreach(json_decode(file_get_contents('data/file_public.json'),true) as $f){echo '<div>'.$f['name'].'</div>';}} ?>

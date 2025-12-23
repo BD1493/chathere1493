@@ -1,0 +1,1 @@
+<?php session_start(); $u=$_SESSION['file_user']; $dir='../files/user_files/'.$u; if(!is_dir($dir)) mkdir($dir,0777,true); file_put_contents($dir.'/'.uniqid().'.json', json_encode($_POST,JSON_PRETTY_PRINT)); header('Location: ../files_dashboard.php');

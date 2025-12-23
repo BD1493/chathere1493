@@ -1,0 +1,1 @@
+<?php session_start(); if(!isset($_SESSION['file_user'])){header('Location:file_login.php');exit;} echo '<h2>Dashboard</h2><a href="file_editor.php">Create File</a> | <a href="public_files.php">Public Docs</a>';
