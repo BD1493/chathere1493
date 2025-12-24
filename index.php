@@ -118,7 +118,7 @@ if (!isset($_COOKIE['policy_accepted'])) {
     <button>Create/Join Private Chat</button>
   </a>
 
-   <a href="file_explorer_FULL_REBUILD/index.php">
+   <a href="https://file-explorer1493.ilja.org">
     <button>Enter File Explorer</button>
   </a>
 </div>
@@ -136,3 +136,4 @@ document.getElementById("declineBtn")?.addEventListener("click", () => {
 
 </body>
 </html>
+
